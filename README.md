@@ -31,6 +31,8 @@ npm install
 npm run db:migrate
 ```
 
+Migrasi menghapus permanen tabel pembayaran, langganan, dan kredit lama. Data akun, percakapan, pesan, serta riwayat generasi tetap dipertahankan. Backup database production sebelum migrasi.
+
 Jalankan aplikasi:
 
 ```powershell

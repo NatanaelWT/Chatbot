@@ -9,7 +9,7 @@ export function AuthPanel({ startupError }: Props) {
         <div className="brand-mark">R<span>↗</span></div>
         <p className="eyebrow">ROUTERCHAT / AI WORKSPACE</p>
         <h1 id="auth-title">Semua model.<br /><em>Satu ruang kerja.</em></h1>
-        <p className="hero-copy">Chat lebih fokus dengan model AI terbaik, riwayat yang rapi, dan kuota yang transparan.</p>
+        <p className="hero-copy">Chat lebih fokus dengan model AI terbaik, riwayat yang rapi, tanpa kredit atau paket langganan.</p>
         <div className="hero-points"><span>01</span><p>Multi-model lewat 9Router</p><span>02</span><p>Respons streaming real-time</p><span>03</span><p>Data &amp; penggunaan terkendali</p></div>
       </section>
       <section className="auth-card" aria-labelledby="auth-form-title">

@@ -27,22 +27,28 @@ test("only the generation owner can stop an active provider request", () => {
   assert.equal(abortGeneration("user-1", "request-1"), false);
 });
 
-test("fresh schema stores generations without billing or quota records", async () => {
+test("fresh schema has no monetization storage and accepts generations directly", async () => {
   const database = await PGlite.create();
   try {
-    await database.exec(await readFile(new URL("../database/schema.sql", import.meta.url), "utf8"));
-    const legacyTables = await database.query<{ table_name: string }>(
-      `SELECT table_name FROM information_schema.tables
-       WHERE table_schema = 'public' AND table_name IN ('plans', 'subscriptions', 'quota_periods', 'usage_ledger', 'billing_events')`,
+    const schema = await readFile(new URL("../database/schema.sql", import.meta.url), "utf8");
+    await database.exec(schema);
+    await database.exec(schema);
+    const obsoleteTables = await database.query<{ table_name: string }>(
+      `SELECT table_name FROM information_schema.tables WHERE table_schema = 'public'
+       AND table_name IN ('plans', 'subscriptions', 'quota_periods', 'usage_ledger', 'billing_events')`,
     );
-    assert.deepEqual(legacyTables.rows, []);
+    const obsoleteColumns = await database.query<{ column_name: string }>(
+      `SELECT column_name FROM information_schema.columns WHERE table_schema = 'public'
+       AND ((table_name = 'generation_runs' AND column_name IN ('quota_period_id', 'reserved_credits', 'charged_credits'))
+         OR (table_name = 'model_catalog' AND column_name IN ('tier', 'input_rate', 'output_rate')))`,
+    );
+    assert.deepEqual(obsoleteTables.rows, []);
+    assert.deepEqual(obsoleteColumns.rows, []);
     await database.exec(`
       INSERT INTO users (id, email) VALUES ('user-1', 'user@gmail.com');
       INSERT INTO conversations (id, user_id) VALUES ('chat-1', 'user-1');
-      INSERT INTO messages (id, conversation_id, role, content_json, status)
-      VALUES ('message-1', 'chat-1', 'assistant', '{"text":""}', 'streaming');
-      INSERT INTO generation_runs (id, request_id, user_id, conversation_id, assistant_message_id, model_id, status)
-      VALUES ('run-1', 'request-1', 'user-1', 'chat-1', 'message-1', 'model-1', 'running');
+      INSERT INTO messages (id, conversation_id, role, content_json, status) VALUES ('message-1', 'chat-1', 'assistant', '{"text":""}', 'streaming');
+      INSERT INTO generation_runs (id, request_id, user_id, conversation_id, assistant_message_id, model_id, status) VALUES ('run-1', 'request-1', 'user-1', 'chat-1', 'message-1', 'model-1', 'running');
     `);
     assert.equal((await database.query<{ count: number }>("SELECT COUNT(*)::int AS count FROM generation_runs")).rows[0].count, 1);
   } finally {
@@ -50,22 +56,37 @@ test("fresh schema stores generations without billing or quota records", async (
   }
 });
 
-test("existing databases keep legacy billing inert and make quota_period_id nullable", async () => {
+test("migration removes legacy monetization storage without deleting chat history", async () => {
   const database = await PGlite.create();
   try {
     await database.exec(`
       CREATE TABLE users (id TEXT PRIMARY KEY, email TEXT NOT NULL UNIQUE, password_hash TEXT, google_sub TEXT, role TEXT NOT NULL DEFAULT 'user', status TEXT NOT NULL DEFAULT 'active', created_at TIMESTAMPTZ NOT NULL DEFAULT NOW());
+      CREATE TABLE model_catalog (id TEXT PRIMARY KEY, display_name TEXT NOT NULL, provider TEXT, tier TEXT NOT NULL, input_rate NUMERIC NOT NULL, output_rate NUMERIC NOT NULL, supports_vision BOOLEAN NOT NULL DEFAULT FALSE, supports_tools BOOLEAN NOT NULL DEFAULT FALSE, supports_streaming BOOLEAN NOT NULL DEFAULT TRUE, enabled BOOLEAN NOT NULL DEFAULT TRUE, updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW());
       CREATE TABLE conversations (id TEXT PRIMARY KEY, user_id TEXT NOT NULL REFERENCES users(id), title TEXT NOT NULL DEFAULT 'Chat baru', status TEXT NOT NULL DEFAULT 'active', created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(), updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW());
       CREATE TABLE messages (id TEXT PRIMARY KEY, conversation_id TEXT NOT NULL REFERENCES conversations(id), parent_message_id TEXT REFERENCES messages(id), role TEXT NOT NULL, content_json JSONB NOT NULL, status TEXT NOT NULL DEFAULT 'complete', created_at TIMESTAMPTZ NOT NULL DEFAULT NOW());
-      CREATE TABLE generation_runs (id TEXT PRIMARY KEY, request_id TEXT NOT NULL UNIQUE, user_id TEXT NOT NULL REFERENCES users(id), conversation_id TEXT NOT NULL REFERENCES conversations(id), assistant_message_id TEXT NOT NULL REFERENCES messages(id), model_id TEXT NOT NULL, quota_period_id TEXT NOT NULL, input_tokens INTEGER NOT NULL DEFAULT 0, output_tokens INTEGER NOT NULL DEFAULT 0, status TEXT NOT NULL, error_code TEXT, duration_ms INTEGER, created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(), completed_at TIMESTAMPTZ);
       CREATE TABLE plans (id TEXT PRIMARY KEY);
+      CREATE TABLE subscriptions (id TEXT PRIMARY KEY, user_id TEXT REFERENCES users(id), plan_id TEXT REFERENCES plans(id));
+      CREATE TABLE quota_periods (id TEXT PRIMARY KEY, subscription_id TEXT REFERENCES subscriptions(id));
+      CREATE TABLE generation_runs (id TEXT PRIMARY KEY, request_id TEXT NOT NULL UNIQUE, user_id TEXT NOT NULL REFERENCES users(id), conversation_id TEXT NOT NULL REFERENCES conversations(id), assistant_message_id TEXT NOT NULL REFERENCES messages(id), model_id TEXT NOT NULL, quota_period_id TEXT REFERENCES quota_periods(id), input_tokens INTEGER NOT NULL DEFAULT 0, output_tokens INTEGER NOT NULL DEFAULT 0, reserved_credits INTEGER NOT NULL DEFAULT 0, charged_credits INTEGER NOT NULL DEFAULT 0, status TEXT NOT NULL, error_code TEXT, duration_ms INTEGER, created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(), completed_at TIMESTAMPTZ);
+      CREATE TABLE usage_ledger (id TEXT PRIMARY KEY, user_id TEXT REFERENCES users(id), generation_run_id TEXT REFERENCES generation_runs(id), credit_delta INTEGER NOT NULL);
+      CREATE TABLE billing_events (id TEXT PRIMARY KEY);
+      INSERT INTO users (id, email) VALUES ('user-1', 'user@gmail.com');
+      INSERT INTO model_catalog (id, display_name, tier, input_rate, output_rate) VALUES ('model-1', 'Model 1', 'paid', 1, 2);
+      INSERT INTO conversations (id, user_id) VALUES ('chat-1', 'user-1');
+      INSERT INTO messages (id, conversation_id, role, content_json, status) VALUES ('message-1', 'chat-1', 'assistant', '{"text":"saved"}', 'complete');
+      INSERT INTO generation_runs (id, request_id, user_id, conversation_id, assistant_message_id, model_id, status) VALUES ('run-1', 'request-1', 'user-1', 'chat-1', 'message-1', 'model-1', 'complete');
     `);
-    await database.exec(await readFile(new URL("../database/schema.sql", import.meta.url), "utf8"));
-    const column = await database.query<{ is_nullable: string }>(
-      "SELECT is_nullable FROM information_schema.columns WHERE table_name = 'generation_runs' AND column_name = 'quota_period_id'",
+    const schema = await readFile(new URL("../database/schema.sql", import.meta.url), "utf8");
+    await database.exec(schema);
+    const obsolete = await database.query<{ count: number }>(
+      `SELECT COUNT(*)::int AS count FROM information_schema.tables WHERE table_schema = 'public'
+       AND table_name IN ('plans', 'subscriptions', 'quota_periods', 'usage_ledger', 'billing_events')`,
     );
-    assert.equal(column.rows[0].is_nullable, "YES");
-    assert.equal((await database.query<{ count: number }>("SELECT COUNT(*)::int AS count FROM information_schema.tables WHERE table_name = 'plans'")).rows[0].count, 1);
+    const runs = await database.query<{ answer: string }>(
+      `SELECT m.content_json->>'text' AS answer FROM generation_runs g JOIN messages m ON m.id = g.assistant_message_id WHERE g.id = 'run-1'`,
+    );
+    assert.equal(obsolete.rows[0].count, 0);
+    assert.deepEqual(runs.rows, [{ answer: "saved" }]);
   } finally {
     await database.close();
   }

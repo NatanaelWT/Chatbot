@@ -2,7 +2,7 @@ import { query } from "./db";
 import { parseAllowedModels } from "./env";
 import { listRouterModels, type RouterModel } from "./9router";
 
-export type PublicModel = { id: string; name: string; provider: string | null; tier: string };
+export type PublicModel = { id: string; name: string; provider: string | null };
 
 function configuredModels(): string[] {
   return parseAllowedModels(process.env.ROUTER9_ALLOWED_MODELS);
@@ -32,7 +32,7 @@ export async function syncAndListModels(signal?: AbortSignal): Promise<PublicMod
   }
   if (selected.length === 0) return [];
   const result = await query<PublicModel>(
-    `SELECT id, display_name AS name, provider, tier
+    `SELECT id, display_name AS name, provider
      FROM model_catalog WHERE enabled = TRUE AND id = ANY($1::text[])`,
     [selected.map((model) => model.id)],
   );
@@ -50,8 +50,8 @@ function modelName(model: RouterModel): string {
 
 export async function getEnabledModel(modelId: string) {
   if (!configuredAllowlist().has(modelId)) return null;
-  const result = await query<{ id: string; input_rate: string; output_rate: string }>(
-    "SELECT id, input_rate, output_rate FROM model_catalog WHERE id = $1 AND enabled = TRUE",
+  const result = await query<{ id: string }>(
+    "SELECT id FROM model_catalog WHERE id = $1 AND enabled = TRUE",
     [modelId],
   );
   return result.rows[0] ?? null;

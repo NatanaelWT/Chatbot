@@ -9,7 +9,7 @@ import { MessageContent } from "./message-content";
 
 type Conversation = { id: string; title: string; status: string; updated_at: string };
 type Message = { id: string; role: "user" | "assistant"; content_json: { text?: string }; status: string };
-type Model = { id: string; name: string; provider: string | null; tier: string };
+type Model = { id: string; name: string; provider: string | null };
 type Props = { user: User; onLoggedOut: () => void };
 
 export function ChatWorkspace({ user, onLoggedOut }: Props) {

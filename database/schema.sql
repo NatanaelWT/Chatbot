@@ -26,15 +26,15 @@ CREATE TABLE IF NOT EXISTS model_catalog (
   id TEXT PRIMARY KEY,
   display_name TEXT NOT NULL,
   provider TEXT,
-  tier TEXT NOT NULL DEFAULT 'standard',
-  input_rate NUMERIC(12,6) NOT NULL DEFAULT 1,
-  output_rate NUMERIC(12,6) NOT NULL DEFAULT 2,
   supports_vision BOOLEAN NOT NULL DEFAULT FALSE,
   supports_tools BOOLEAN NOT NULL DEFAULT FALSE,
   supports_streaming BOOLEAN NOT NULL DEFAULT TRUE,
   enabled BOOLEAN NOT NULL DEFAULT TRUE,
   updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
+ALTER TABLE model_catalog DROP COLUMN IF EXISTS tier;
+ALTER TABLE model_catalog DROP COLUMN IF EXISTS input_rate;
+ALTER TABLE model_catalog DROP COLUMN IF EXISTS output_rate;
 
 CREATE TABLE IF NOT EXISTS conversations (
   id TEXT PRIMARY KEY,
@@ -74,16 +74,15 @@ CREATE TABLE IF NOT EXISTS generation_runs (
 );
 CREATE INDEX IF NOT EXISTS generation_runs_user_created_idx ON generation_runs(user_id, created_at DESC);
 
--- ponytail: Existing databases retain inert billing tables for rollback; remove them only in an approved destructive migration.
-DO $$
-BEGIN
-  IF EXISTS (
-    SELECT 1 FROM information_schema.columns
-    WHERE table_schema = 'public' AND table_name = 'generation_runs' AND column_name = 'quota_period_id'
-  ) THEN
-    ALTER TABLE generation_runs ALTER COLUMN quota_period_id DROP NOT NULL;
-  END IF;
-END $$;
+-- Remove obsolete monetization storage while preserving users, conversations, messages, and generation history.
+DROP TABLE IF EXISTS usage_ledger;
+DROP TABLE IF EXISTS billing_events;
+ALTER TABLE generation_runs DROP COLUMN IF EXISTS quota_period_id;
+ALTER TABLE generation_runs DROP COLUMN IF EXISTS reserved_credits;
+ALTER TABLE generation_runs DROP COLUMN IF EXISTS charged_credits;
+DROP TABLE IF EXISTS quota_periods;
+DROP TABLE IF EXISTS subscriptions;
+DROP TABLE IF EXISTS plans;
 
 CREATE TABLE IF NOT EXISTS rate_limits (
   key_hash TEXT PRIMARY KEY,
