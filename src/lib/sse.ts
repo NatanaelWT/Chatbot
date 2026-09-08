@@ -45,26 +45,40 @@ export function parseJsonSseBuffer(buffer: string, flush = false): JsonSseResult
   return { events, done, remainder };
 }
 
+function hasTerminalFinishReason(event: JsonSseEvent): boolean {
+  const choices = Array.isArray(event.choices) ? event.choices : [];
+  return choices.some((choice) => {
+    if (!choice || typeof choice !== "object") return false;
+    const finishReason = (choice as { finish_reason?: unknown }).finish_reason;
+    return typeof finishReason === "string" && finishReason.length > 0;
+  });
+}
+
 export async function* readJsonSseStream(stream: ReadableStream<Uint8Array>): AsyncGenerator<JsonSseEvent> {
   const reader = stream.getReader();
   const decoder = new TextDecoder();
   let buffer = "";
   let finished = false;
+  let sawTerminalFinishReason = false;
   try {
     while (true) {
       const { done: streamEnded, value } = await reader.read();
       buffer += decoder.decode(value ?? new Uint8Array(), { stream: !streamEnded });
       const parsed = parseJsonSseBuffer(buffer, streamEnded);
       buffer = parsed.remainder;
-      for (const event of parsed.events) yield event;
+      for (const event of parsed.events) {
+        if (hasTerminalFinishReason(event)) sawTerminalFinishReason = true;
+        yield event;
+      }
       if (parsed.done) {
         finished = true;
         await reader.cancel().catch(() => undefined);
-        break;
+        return;
       }
       if (streamEnded) {
         finished = true;
-        break;
+        if (sawTerminalFinishReason) return;
+        throw new Error("Stream provider berakhir sebelum penanda selesai.");
       }
     }
   } finally {

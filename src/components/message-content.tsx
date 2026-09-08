@@ -1,10 +1,10 @@
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 
-export function MessageContent({ children, loading = false }: { children: string; loading?: boolean }) {
+export function MessageContent({ children, loading = false, errorMessage }: { children: string; loading?: boolean; errorMessage?: string }) {
   if (!children) return loading
     ? <span className="typing-dots" aria-label="AI sedang menulis"><i /><i /><i /></span>
-    : <span className="message-empty">Jawaban tidak dapat diselesaikan.</span>;
+    : <span className="message-empty">{errorMessage ?? "Jawaban tidak dapat diselesaikan. Silakan coba lagi."}</span>;
   return (
     <div className="markdown break-words">
       <ReactMarkdown

@@ -7,7 +7,7 @@ Chatbot Next.js gratis dengan login wajib, history persisten, streaming SSE, ser
 - Login/registrasi tunggal melalui Google OAuth untuk akun Gmail, hashed session, RBAC admin.
 - Chat tanpa kuota untuk semua pengguna terautentikasi.
 - Percakapan persisten dengan ownership server-side.
-- Allowlist model provider AI dan streaming SSE.
+- Allowlist model provider AI, streaming SSE, retry gangguan sementara, serta timeout idle.
 - PGlite persisten untuk lokal; PostgreSQL tetap didukung untuk deployment.
 - Dashboard `/admin` untuk metrik penggunaan, pengguna, dan error generasi.
 - Pencarian judul percakapan dan Markdown.
@@ -53,7 +53,7 @@ npm run admin:promote -- natanaelhdxd25@gmail.com
 
 CLI menolak email yang belum masuk melalui Google, serta mencatat promosi ke `audit_logs`. Admin mendapat menu `/admin` dan tetap dapat memakai chatbot. Batas panjang pesan, konteks, output, serta infrastruktur provider tetap berlaku.
 
-`ROUTER9_ALLOWED_MODELS` wajib berisi ID model yang diizinkan; model pertama yang tersedia menjadi default. Secret tidak boleh memakai awalan `NEXT_PUBLIC_`. Isi `ROUTER9_BASE_URL`, `ROUTER9_API_KEY`, serta allowlist di `.env.local`; tidak diperlukan runtime atau model AI lokal.
+`ROUTER9_ALLOWED_MODELS` wajib berisi ID model yang diizinkan; model pertama yang tersedia menjadi default. Letakkan model ringan/cepat di urutan pertama untuk menurunkan waktu respons. `ROUTER9_TIMEOUT_MS` membatasi waktu tanpa token baru, bukan total durasi jawaban; kegagalan provider sementara dicoba ulang sekali sebelum output dimulai. Secret tidak boleh memakai awalan `NEXT_PUBLIC_`. Isi `ROUTER9_BASE_URL`, `ROUTER9_API_KEY`, serta allowlist di `.env.local`; tidak diperlukan runtime atau model AI lokal.
 
 ## Verifikasi
 

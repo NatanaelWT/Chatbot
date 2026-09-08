@@ -11,8 +11,8 @@ export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
 const MAX_MESSAGE_LENGTH = 20_000;
-const MAX_CONTEXT_MESSAGES = 40;
-const MAX_CONTEXT_BYTES = 40_000;
+const MAX_CONTEXT_MESSAGES = 20;
+const MAX_HISTORY_BYTES = 16_000;
 const MAX_OUTPUT_TOKENS = 2_048;
 
 type ContextRow = { role: "user" | "assistant" | "system"; content_json: { text?: unknown } };
@@ -104,11 +104,11 @@ export async function POST(request: Request) {
         streamError = error;
       }
 
-      const aborted = providerAbortController.signal.aborted || isAbortError(streamError);
-      const status = streamError ? (answer ? "partial" : "failed") : aborted ? "partial" : "complete";
+      const canceled = providerAbortController.signal.aborted || isAbortError(streamError);
+      const status = streamError || canceled ? (answer ? "partial" : "failed") : "complete";
       const effectiveInput = inputTokens || inputTokensEstimate;
       const effectiveOutput = outputTokens || estimateTokens(answer);
-      const errorCode = aborted ? "ABORTED" : streamError instanceof RouterError ? `ROUTER_${streamError.status}` : streamError ? "STREAM_ERROR" : null;
+      const errorCode = canceled ? "CANCELED" : streamError instanceof RouterError ? `ROUTER_${streamError.status}` : streamError ? "STREAM_ERROR" : null;
       try {
         await finishGeneration({
           ...started,
@@ -119,8 +119,9 @@ export async function POST(request: Request) {
           outputTokens: effectiveOutput,
           durationMs: Date.now() - startedAt,
         });
-        if (streamError && !aborted) send("error", { message: streamError instanceof RouterError ? streamError.message : "Koneksi AI terputus." });
-        send("done", { status, usage: { inputTokens: effectiveInput, outputTokens: effectiveOutput } });
+        if (streamError && !canceled) send("error", { message: streamError instanceof RouterError ? streamError.message : "Koneksi AI terputus." });
+        if (errorCode && errorCode !== "CANCELED") console.warn("Generation did not complete", { requestId, model: model.id, errorCode, durationMs: Date.now() - startedAt });
+        send("done", { status, errorCode, usage: { inputTokens: effectiveInput, outputTokens: effectiveOutput } });
       } catch (error) {
         console.error("Could not finish generation", error);
         send("error", { message: "Jawaban selesai, tetapi pencatatan penggunaan gagal." });
@@ -156,15 +157,17 @@ async function startGeneration(userId: string, conversationId: string, modelId: 
     if (duplicate.rows[0]) throw new Error("DUPLICATE");
     const history = await client.query<ContextRow>(
       `SELECT role, content_json FROM (
-         SELECT role, content_json, created_at FROM messages
+         SELECT id, role, content_json, created_at FROM messages
          WHERE conversation_id = $1 AND role IN ('user', 'assistant', 'system') AND status IN ('complete', 'partial')
-         ORDER BY created_at DESC LIMIT $2
-       ) recent ORDER BY created_at`,
+           AND (role <> 'user' OR NOT EXISTS (SELECT 1 FROM messages child WHERE child.parent_message_id = messages.id)
+             OR EXISTS (SELECT 1 FROM messages child WHERE child.parent_message_id = messages.id AND child.status IN ('complete', 'partial')))
+         ORDER BY created_at DESC, CASE role WHEN 'assistant' THEN 0 ELSE 1 END, id DESC LIMIT $2
+       ) recent ORDER BY created_at, CASE role WHEN 'user' THEN 0 ELSE 1 END, id`,
       [conversationId, MAX_CONTEXT_MESSAGES],
     );
     const allContext = [...history.rows.map((row) => ({ role: row.role, content: typeof row.content_json.text === "string" ? row.content_json.text : "" })), { role: "user", content: message }];
     const context: Array<{ role: string; content: string }> = [];
-    let remainingBytes = MAX_CONTEXT_BYTES;
+    let remainingBytes = MAX_HISTORY_BYTES + Buffer.byteLength(message, "utf8");
     for (let index = allContext.length - 1; index >= 0 && remainingBytes > 0; index -= 1) {
       const item = allContext[index];
       const content = Buffer.byteLength(item.content, "utf8") <= remainingBytes ? item.content : Buffer.from(item.content).subarray(-remainingBytes).toString("utf8").replace(/^\uFFFD+/, "");
@@ -184,8 +187,8 @@ async function startGeneration(userId: string, conversationId: string, modelId: 
     const assistantMessageId = randomUUID();
     const runId = randomUUID();
     await client.query(
-      `INSERT INTO messages (id, conversation_id, role, content_json, status) VALUES
-       ($1, $2, 'user', $3, 'complete'), ($4, $2, 'assistant', $5, 'streaming')`,
+      `INSERT INTO messages (id, conversation_id, parent_message_id, role, content_json, status) VALUES
+       ($1, $2, NULL, 'user', $3, 'complete'), ($4, $2, $1, 'assistant', $5, 'streaming')`,
       [userMessageId, conversationId, { text: message }, assistantMessageId, { text: "" }],
     );
     await client.query(

@@ -15,8 +15,10 @@ export async function GET(_request: Request, context: RouteContext) {
   );
   if (!conversation.rows[0]) return jsonError("Percakapan tidak ditemukan.", 404, "NOT_FOUND");
   const messages = await query(
-    `SELECT id, parent_message_id, role, content_json, status, created_at
-     FROM messages WHERE conversation_id = $1 ORDER BY created_at`,
+    `SELECT m.id, m.parent_message_id, m.role, m.content_json, m.status, m.created_at, g.error_code
+     FROM messages m LEFT JOIN generation_runs g ON g.assistant_message_id = m.id
+     WHERE m.conversation_id = $1
+     ORDER BY m.created_at, CASE m.role WHEN 'user' THEN 0 ELSE 1 END, m.id`,
     [id],
   );
   return Response.json({ conversation: conversation.rows[0], messages: messages.rows });

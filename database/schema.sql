@@ -56,6 +56,13 @@ CREATE TABLE IF NOT EXISTS messages (
   created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 CREATE INDEX IF NOT EXISTS messages_conversation_created_idx ON messages(conversation_id, created_at);
+-- Link legacy assistant messages to their nearest preceding prompt for reliable retry/context filtering.
+UPDATE messages AS assistant SET parent_message_id = (
+  SELECT prompt.id FROM messages AS prompt
+  WHERE prompt.conversation_id = assistant.conversation_id
+    AND prompt.role = 'user' AND prompt.created_at <= assistant.created_at
+  ORDER BY prompt.created_at DESC, prompt.id DESC LIMIT 1
+) WHERE assistant.role = 'assistant' AND assistant.parent_message_id IS NULL;
 
 CREATE TABLE IF NOT EXISTS generation_runs (
   id TEXT PRIMARY KEY,

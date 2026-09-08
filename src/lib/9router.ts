@@ -1,5 +1,5 @@
-import { getEnv } from "./env";
-import { readJsonSseStream } from "./sse";
+import { getEnv } from "./env.ts";
+import { readJsonSseStream } from "./sse.ts";
 
 export type RouterModel = {
   id: string;
@@ -9,9 +9,12 @@ export type RouterModel = {
 };
 
 export class RouterError extends Error {
-  constructor(public readonly status: number, message: string) {
+  readonly status: number;
+
+  constructor(status: number, message: string) {
     super(message);
     this.name = "RouterError";
+    this.status = status;
   }
 }
 
@@ -53,13 +56,50 @@ export async function listRouterModels(signal?: AbortSignal): Promise<RouterMode
 
 export type RouterStreamEvent = Record<string, unknown>;
 
-export async function* streamRouterChat(payload: Record<string, unknown>, signal?: AbortSignal): AsyncGenerator<RouterStreamEvent> {
+const RETRYABLE_STATUSES = new Set([408, 429, 500, 502, 503]);
+
+function providerEventError(event: RouterStreamEvent): RouterError | null {
+  const value = event.error;
+  if (!value) return null;
+  const error = typeof value === "object" ? value as Record<string, unknown> : {};
+  const rawCode = error.status ?? error.code;
+  let status = typeof rawCode === "number" && rawCode >= 400 && rawCode <= 599 ? rawCode : 502;
+  const code = typeof rawCode === "string" ? rawCode.toLowerCase() : "";
+  if (code.includes("rate") || code.includes("quota")) status = 429;
+  else if (code.includes("auth") || code.includes("key")) status = 401;
+  else if (code.includes("timeout")) status = 504;
+  const message = status === 429
+    ? "Provider AI sedang membatasi permintaan. Coba lagi sesaat."
+    : status === 401 || status === 403
+      ? "Autentikasi provider AI ditolak. Hubungi administrator."
+      : "Provider AI gagal memproses jawaban.";
+  return new RouterError(status, message);
+}
+
+function normalizeRouterError(error: unknown): unknown {
+  if (error instanceof RouterError || (error instanceof Error && error.name === "AbortError")) return error;
+  return new RouterError(502, "Provider AI tidak dapat dihubungi.");
+}
+
+async function* streamRouterChatAttempt(
+  payload: Record<string, unknown>,
+  signal: AbortSignal | undefined,
+): AsyncGenerator<RouterStreamEvent> {
   const { routerBaseUrl, routerTimeoutMs } = getEnv();
   const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), routerTimeoutMs);
+  let timedOut = false;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const resetIdleTimeout = () => {
+    clearTimeout(timer);
+    timer = setTimeout(() => {
+      timedOut = true;
+      controller.abort();
+    }, routerTimeoutMs);
+  };
   const onAbort = () => controller.abort();
   if (signal?.aborted) controller.abort();
   else signal?.addEventListener("abort", onAbort, { once: true });
+  resetIdleTimeout();
   try {
     const response = await fetch(`${routerBaseUrl}/chat/completions`, {
       method: "POST",
@@ -70,10 +110,37 @@ export async function* streamRouterChat(payload: Record<string, unknown>, signal
     });
     if (!response.ok) throw new RouterError(response.status, await readError(response));
     if (!response.body) throw new RouterError(502, "Stream provider AI kosong.");
-    for await (const event of readJsonSseStream(response.body)) yield event;
+    for await (const event of readJsonSseStream(response.body)) {
+      resetIdleTimeout();
+      yield event;
+    }
+  } catch (error) {
+    if (timedOut) throw new RouterError(504, "Provider AI terlalu lama tidak mengirim jawaban.");
+    throw error;
   } finally {
     clearTimeout(timer);
     signal?.removeEventListener("abort", onAbort);
+  }
+}
+
+export async function* streamRouterChat(payload: Record<string, unknown>, signal?: AbortSignal): AsyncGenerator<RouterStreamEvent> {
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    let hasContent = false;
+    try {
+      for await (const event of streamRouterChatAttempt(payload, signal)) {
+        const eventError = providerEventError(event);
+        if (eventError) throw eventError;
+        if (extractDelta(event)) hasContent = true;
+        yield event;
+      }
+      if (!hasContent) throw new RouterError(502, "Provider AI tidak mengirim jawaban.");
+      return;
+    } catch (error) {
+      if (signal?.aborted) throw error;
+      const normalized = normalizeRouterError(error);
+      if (attempt === 0 && !hasContent && normalized instanceof RouterError && RETRYABLE_STATUSES.has(normalized.status)) continue;
+      throw normalized;
+    }
   }
 }
 

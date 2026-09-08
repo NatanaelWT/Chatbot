@@ -8,9 +8,17 @@ import type { User } from "./chat-shell";
 import { MessageContent } from "./message-content";
 
 type Conversation = { id: string; title: string; status: string; updated_at: string };
-type Message = { id: string; role: "user" | "assistant"; content_json: { text?: string }; status: string };
+type Message = { id: string; parent_message_id?: string | null; role: "user" | "assistant"; content_json: { text?: string }; status: string; error_code?: string | null };
 type Model = { id: string; name: string; provider: string | null };
 type Props = { user: User; onLoggedOut: () => void };
+
+function generationErrorMessage(errorCode?: string | null): string {
+  if (errorCode === "ROUTER_429") return "Provider AI sedang sibuk. Silakan coba lagi sesaat.";
+  if (errorCode === "ROUTER_504") return "Provider AI terlalu lama tidak merespons. Silakan coba lagi.";
+  if (errorCode === "ROUTER_401" || errorCode === "ROUTER_403") return "Akses provider AI bermasalah. Hubungi administrator.";
+  if (errorCode === "CANCELED") return "Jawaban dihentikan.";
+  return "Koneksi AI terputus. Silakan coba lagi.";
+}
 
 export function ChatWorkspace({ user, onLoggedOut }: Props) {
   const router = useRouter();
@@ -94,9 +102,13 @@ export function ChatWorkspace({ user, onLoggedOut }: Props) {
   }
 
 
-  async function sendMessage(event: FormEvent) {
+  function sendMessage(event: FormEvent) {
     event.preventDefault();
-    const text = input.trim();
+    void sendText(input);
+  }
+
+  async function sendText(value: string) {
+    const text = value.trim();
     if (!text || sending || !selectedModel) return;
     let conversationId = activeId;
     if (!conversationId) {
@@ -115,7 +127,7 @@ export function ChatWorkspace({ user, onLoggedOut }: Props) {
     abortRef.current = controller;
     requestIdRef.current = requestId;
     const localUser: Message = { id: `user-${requestId}`, role: "user", content_json: { text }, status: "complete" };
-    const localAssistant: Message = { id: `assistant-${requestId}`, role: "assistant", content_json: { text: "" }, status: "streaming" };
+    const localAssistant: Message = { id: `assistant-${requestId}`, parent_message_id: localUser.id, role: "assistant", content_json: { text: "" }, status: "streaming" };
     setMessageConversationId(conversationId);
     setMessages((current) => messageConversationId === conversationId ? [...current, localUser, localAssistant] : [localUser, localAssistant]);
     let assistantMessageId = localAssistant.id;
@@ -132,7 +144,7 @@ export function ChatWorkspace({ user, onLoggedOut }: Props) {
         throw new Error(failure.error?.message ?? "Pesan gagal dikirim.");
       }
       await readSseStream(response, ({ event: streamEvent, data }) => {
-        const payload = data as { content?: string; message?: string; messageId?: string; status?: string };
+        const payload = data as { content?: string; message?: string; messageId?: string; status?: string; errorCode?: string | null };
         if (streamEvent === "meta" && payload.messageId) {
           const previousId = assistantMessageId;
           assistantMessageId = payload.messageId;
@@ -142,7 +154,7 @@ export function ChatWorkspace({ user, onLoggedOut }: Props) {
         if (streamEvent === "error") setError(payload.message ?? "Koneksi AI terputus.");
         if (streamEvent === "done") {
           receivedDone = true;
-          setMessages((current) => current.map((item) => item.id === assistantMessageId ? { ...item, status: payload.status ?? "complete" } : item));
+          setMessages((current) => current.map((item) => item.id === assistantMessageId ? { ...item, status: payload.status ?? "complete", error_code: payload.errorCode } : item));
         }
       });
       if (!receivedDone) throw new Error("Koneksi jawaban berakhir sebelum AI selesai.");
@@ -156,16 +168,26 @@ export function ChatWorkspace({ user, onLoggedOut }: Props) {
       }
       await loadConversations();
     } catch (reason) {
+      const canceled = reason instanceof DOMException && reason.name === "AbortError";
       setMessages((current) => current.map((item) => item.id === assistantMessageId
-        ? { ...item, status: item.content_json.text ? "partial" : "failed" }
+        ? { ...item, status: item.content_json.text ? "partial" : "failed", error_code: canceled ? "CANCELED" : item.error_code }
         : item));
-      if (!(reason instanceof DOMException && reason.name === "AbortError")) setError(reason instanceof Error ? reason.message : "Pesan gagal dikirim.");
+      if (!canceled) setError(reason instanceof Error ? reason.message : "Pesan gagal dikirim.");
     } finally {
       if (streamingConversationRef.current === conversationId) streamingConversationRef.current = null;
       setSending(false);
       abortRef.current = null;
       requestIdRef.current = null;
     }
+  }
+
+  function retryMessage(message: Message) {
+    const messageIndex = messages.findIndex((item) => item.id === message.id);
+    const source = message.parent_message_id
+      ? messages.find((item) => item.id === message.parent_message_id)
+      : messages.slice(0, messageIndex).reverse().find((item) => item.role === "user");
+    const text = source?.content_json.text;
+    if (text) void sendText(text);
   }
 
   function stopGeneration() {
@@ -189,7 +211,7 @@ export function ChatWorkspace({ user, onLoggedOut }: Props) {
       {mobileSidebar && <button type="button" className="sidebar-scrim" aria-label="Tutup sidebar" onClick={() => setMobileSidebar(false)} />}
       <section className="chat-area">
         <header className="chat-header"><button type="button" className="icon-button mobile-only" aria-label="Buka sidebar" onClick={() => setMobileSidebar(true)}>☰</button><div><p className="eyebrow">CONVERSATION / {activeConversation ? "ACTIVE" : "NEW"}</p><h2>{activeConversation?.title ?? "Percakapan baru"}</h2></div><div className="header-actions"><label className="model-select"><span>MODEL</span><select aria-label="Pilih model AI" value={selectedModel} onChange={(event) => setSelectedModel(event.target.value)} disabled={!models.length}>{models.map((model) => <option key={model.id} value={model.id}>{model.name}</option>)}</select></label></div></header>
-        <div className="message-scroll"><div className="message-column">{!visibleMessages.length ? <div className="welcome"><div className="welcome-icon">✦</div><p className="eyebrow">READY WHEN YOU ARE</p><h1>Mulai dari satu<br /><em>pertanyaan.</em></h1><p className="welcome-copy">Pilih model AI lalu tulis apa yang ada di pikiranmu. RouterChat akan membantu menyusun sisanya.</p><div className="prompt-grid"><button type="button" onClick={() => setInput("Bantu saya menyusun rencana yang lebih baik untuk minggu ini")}>Rencanakan minggu ini <span>↗</span></button><button type="button" onClick={() => setInput("Jelaskan konsep ini dengan cara yang sederhana")}>Jelaskan sesuatu <span>↗</span></button></div></div> : visibleMessages.map((message) => <article className={`message ${message.role}`} key={message.id}><div className="message-meta"><span className={message.role === "assistant" ? "assistant-dot" : "avatar tiny"}>{message.role === "assistant" ? "✦" : user.email[0].toUpperCase()}</span><strong>{message.role === "assistant" ? "RouterChat" : "Kamu"}</strong></div><MessageContent loading={message.status === "streaming"}>{message.content_json.text ?? ""}</MessageContent>{message.role === "assistant" && message.content_json.text && <div className="message-tools"><button type="button" onClick={() => navigator.clipboard.writeText(message.content_json.text ?? "")}>Salin</button></div>}</article>)}<div ref={endRef} /></div></div>
+        <div className="message-scroll"><div className="message-column">{!visibleMessages.length ? <div className="welcome"><div className="welcome-icon">✦</div><p className="eyebrow">READY WHEN YOU ARE</p><h1>Mulai dari satu<br /><em>pertanyaan.</em></h1><p className="welcome-copy">Pilih model AI lalu tulis apa yang ada di pikiranmu. RouterChat akan membantu menyusun sisanya.</p><div className="prompt-grid"><button type="button" onClick={() => setInput("Bantu saya menyusun rencana yang lebih baik untuk minggu ini")}>Rencanakan minggu ini <span>↗</span></button><button type="button" onClick={() => setInput("Jelaskan konsep ini dengan cara yang sederhana")}>Jelaskan sesuatu <span>↗</span></button></div></div> : visibleMessages.map((message) => <article className={`message ${message.role}`} key={message.id}><div className="message-meta"><span className={message.role === "assistant" ? "assistant-dot" : "avatar tiny"}>{message.role === "assistant" ? "✦" : user.email[0].toUpperCase()}</span><strong>{message.role === "assistant" ? "RouterChat" : "Kamu"}</strong></div><MessageContent loading={message.status === "streaming"} errorMessage={message.status === "failed" ? generationErrorMessage(message.error_code) : undefined}>{message.content_json.text ?? ""}</MessageContent>{message.role === "assistant" && message.status === "partial" && <p className="message-notice">{generationErrorMessage(message.error_code)}</p>}{message.role === "assistant" && (message.content_json.text || message.status === "failed" || message.status === "partial") && <div className="message-tools">{message.content_json.text && <button type="button" onClick={() => navigator.clipboard.writeText(message.content_json.text ?? "")}>Salin</button>}{(message.status === "failed" || message.status === "partial") && <button type="button" onClick={() => retryMessage(message)} disabled={sending}>Coba lagi</button>}</div>}</article>)}<div ref={endRef} /></div></div>
         {error && <p className="workspace-error" role="alert">{error}</p>}
         <div className="composer-wrap"><form className="composer" onSubmit={sendMessage}><textarea name="message" aria-label="Tulis pesan" autoComplete="off" value={input} onChange={(event) => setInput(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter" && !event.shiftKey && !event.nativeEvent.isComposing) { event.preventDefault(); event.currentTarget.form?.requestSubmit(); } }} placeholder="Tulis pesan…" rows={1} maxLength={20000} disabled={sending} /><div className="composer-footer"><span className="composer-hint">{selectedModel ? "Enter untuk kirim · Shift + Enter untuk baris baru" : "Pilih model AI untuk memulai"}</span><div className="composer-actions">{sending ? <button type="button" className="stop-button" onClick={stopGeneration} aria-label="Hentikan jawaban">■</button> : <button type="submit" className="send-button" disabled={!input.trim() || !selectedModel} aria-label="Kirim pesan">↗</button>}</div></div></form><p className="disclaimer">RouterChat dapat membuat kesalahan. Periksa informasi penting.</p></div>
       </section>
