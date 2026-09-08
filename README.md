@@ -9,7 +9,8 @@ Chatbot Next.js gratis dengan login wajib, history persisten, streaming SSE, ser
 - Percakapan persisten dengan ownership server-side.
 - Allowlist model provider AI, streaming SSE, retry gangguan sementara, serta timeout idle.
 - PGlite persisten untuk lokal; PostgreSQL tetap didukung untuk deployment.
-- Dashboard `/admin` untuk metrik penggunaan, pengguna, dan error generasi.
+- Dashboard admin terpisah: ringkasan `/admin`, penggunaan `/admin/usage`, pengguna `/admin/users`, dan error `/admin/errors`.
+- Impersonasi akun pengguna dari `/admin/users`, dengan rotasi sesi, banner persisten, kontrol kembali ke admin, dan audit log.
 - Pencarian judul percakapan dan Markdown.
 
 ## Prasyarat

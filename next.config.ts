@@ -14,7 +14,7 @@ const securityHeaders = [
 ];
 
 const nextConfig: NextConfig = {
-  transpilePackages: ["@electric-sql/pglite"],
+  serverExternalPackages: ["@electric-sql/pglite"],
   async headers() {
     return [{ source: "/(.*)", headers: securityHeaders }];
   },

@@ -15,11 +15,24 @@ CREATE UNIQUE INDEX IF NOT EXISTS users_google_sub_idx ON users(google_sub) WHER
 CREATE TABLE IF NOT EXISTS sessions (
   id TEXT PRIMARY KEY,
   user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  impersonator_user_id TEXT REFERENCES users(id) ON DELETE CASCADE,
   token_hash TEXT NOT NULL UNIQUE,
   expires_at TIMESTAMPTZ NOT NULL,
-  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  CONSTRAINT sessions_impersonator_not_self CHECK (impersonator_user_id IS NULL OR impersonator_user_id <> user_id)
 );
+ALTER TABLE sessions ADD COLUMN IF NOT EXISTS impersonator_user_id TEXT REFERENCES users(id) ON DELETE CASCADE;
+DO $$ BEGIN
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_constraint
+    WHERE conname = 'sessions_impersonator_not_self' AND conrelid = 'sessions'::regclass
+  ) THEN
+    ALTER TABLE sessions ADD CONSTRAINT sessions_impersonator_not_self
+      CHECK (impersonator_user_id IS NULL OR impersonator_user_id <> user_id);
+  END IF;
+END $$;
 CREATE INDEX IF NOT EXISTS sessions_user_idx ON sessions(user_id);
+CREATE INDEX IF NOT EXISTS sessions_impersonator_idx ON sessions(impersonator_user_id) WHERE impersonator_user_id IS NOT NULL;
 CREATE INDEX IF NOT EXISTS sessions_expiry_idx ON sessions(expires_at);
 
 CREATE TABLE IF NOT EXISTS model_catalog (

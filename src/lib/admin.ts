@@ -1,22 +1,27 @@
 import { query } from "./db";
 
+export type AdminOverview = {
+  users: number;
+  activeUsersToday: number;
+  generationsToday: number;
+  failedToday: number;
+  totalGenerations: number;
+  activeAccounts: number;
+};
+export type AdminDailyUsage = Array<{ day: string; successful: number; failed: number; activeUsers: number }>;
+export type AdminRoleDistribution = Array<{ role: string; users: number }>;
+export type AdminUser = { id: string; email: string; role: string; status: string; generations: number; createdAt: string };
+export type AdminError = { email: string; model: string; errorCode: string | null; durationMs: number | null; createdAt: string };
 export type AdminDashboardData = {
-  overview: {
-    users: number;
-    activeUsersToday: number;
-    generationsToday: number;
-    failedToday: number;
-    totalGenerations: number;
-    activeAccounts: number;
-  };
-  dailyUsage: Array<{ day: string; successful: number; failed: number; activeUsers: number }>;
-  roleDistribution: Array<{ role: string; users: number }>;
-  recentUsers: Array<{ email: string; role: string; status: string; generations: number; createdAt: string }>;
-  recentErrors: Array<{ email: string; model: string; errorCode: string | null; durationMs: number | null; createdAt: string }>;
+  overview: AdminOverview;
+  dailyUsage: AdminDailyUsage;
+  roleDistribution: AdminRoleDistribution;
+  recentUsers: AdminUser[];
+  recentErrors: AdminError[];
 };
 
-export async function getAdminDashboardData(): Promise<AdminDashboardData> {
-  const overviewResult = await query<{
+export async function getAdminOverview(): Promise<AdminOverview> {
+  const result = await query<{
     users: number;
     active_users_today: number;
     generations_today: number;
@@ -30,8 +35,19 @@ export async function getAdminDashboardData(): Promise<AdminDashboardData> {
     (SELECT COUNT(*)::int FROM generation_runs WHERE status = 'failed' AND created_at >= CURRENT_DATE) AS failed_today,
     (SELECT COUNT(*)::int FROM generation_runs WHERE status <> 'failed') AS total_generations,
     (SELECT COUNT(*)::int FROM users WHERE status = 'active') AS active_accounts`);
+  const row = result.rows[0];
+  return {
+    users: row.users,
+    activeUsersToday: row.active_users_today,
+    generationsToday: row.generations_today,
+    failedToday: row.failed_today,
+    totalGenerations: row.total_generations,
+    activeAccounts: row.active_accounts,
+  };
+}
 
-  const dailyResult = await query<{ day: string; successful: number; failed: number; active_users: number }>(
+export async function getAdminDailyUsage(): Promise<AdminDailyUsage> {
+  const result = await query<{ day: string; successful: number; failed: number; active_users: number }>(
     `SELECT days.day::date::text AS day,
        COUNT(g.id) FILTER (WHERE g.status <> 'failed')::int AS successful,
        COUNT(g.id) FILTER (WHERE g.status = 'failed')::int AS failed,
@@ -40,38 +56,42 @@ export async function getAdminDashboardData(): Promise<AdminDashboardData> {
      LEFT JOIN generation_runs g ON g.created_at >= days.day AND g.created_at < days.day + INTERVAL '1 day'
      GROUP BY days.day ORDER BY days.day`,
   );
+  return result.rows.map((row) => ({ day: row.day, successful: row.successful, failed: row.failed, activeUsers: row.active_users }));
+}
 
-  const rolesResult = await query<{ role: string; users: number }>(
-    `SELECT role, COUNT(*)::int AS users
-     FROM users GROUP BY role ORDER BY users DESC, role`,
+export async function getAdminRoleDistribution(): Promise<AdminRoleDistribution> {
+  const result = await query<{ role: string; users: number }>(
+    "SELECT role, COUNT(*)::int AS users FROM users GROUP BY role ORDER BY users DESC, role",
   );
+  return result.rows;
+}
 
-  const usersResult = await query<{ email: string; role: string; status: string; generations: number; created_at: string }>(
-    `SELECT u.email, u.role, u.status,
+export async function getAdminUsers(limit = 50): Promise<AdminUser[]> {
+  const safeLimit = Math.max(1, Math.min(50, Math.trunc(limit)));
+  const result = await query<{ id: string; email: string; role: string; status: string; generations: number; created_at: string }>(
+    `SELECT u.id, u.email, u.role, u.status,
        (SELECT COUNT(*)::int FROM generation_runs g WHERE g.user_id = u.id AND g.status <> 'failed') AS generations,
        u.created_at
-     FROM users u ORDER BY u.created_at DESC LIMIT 8`,
+     FROM users u ORDER BY u.created_at DESC LIMIT $1`,
+    [safeLimit],
   );
+  return result.rows.map((row) => ({ id: row.id, email: row.email, role: row.role, status: row.status, generations: row.generations, createdAt: row.created_at }));
+}
 
-  const errorsResult = await query<{ email: string; model: string; error_code: string | null; duration_ms: number | null; created_at: string }>(
+export async function getAdminErrors(limit = 50): Promise<AdminError[]> {
+  const safeLimit = Math.max(1, Math.min(50, Math.trunc(limit)));
+  const result = await query<{ email: string; model: string; error_code: string | null; duration_ms: number | null; created_at: string }>(
     `SELECT u.email, g.model_id AS model, g.error_code, g.duration_ms, g.created_at
      FROM generation_runs g JOIN users u ON u.id = g.user_id
-     WHERE g.status = 'failed' ORDER BY g.created_at DESC LIMIT 8`,
+     WHERE g.status = 'failed' ORDER BY g.created_at DESC LIMIT $1`,
+    [safeLimit],
   );
+  return result.rows.map((row) => ({ email: row.email, model: row.model, errorCode: row.error_code, durationMs: row.duration_ms, createdAt: row.created_at }));
+}
 
-  const overview = overviewResult.rows[0];
-  return {
-    overview: {
-      users: overview.users,
-      activeUsersToday: overview.active_users_today,
-      generationsToday: overview.generations_today,
-      failedToday: overview.failed_today,
-      totalGenerations: overview.total_generations,
-      activeAccounts: overview.active_accounts,
-    },
-    dailyUsage: dailyResult.rows.map((row) => ({ day: row.day, successful: row.successful, failed: row.failed, activeUsers: row.active_users })),
-    roleDistribution: rolesResult.rows,
-    recentUsers: usersResult.rows.map((row) => ({ email: row.email, role: row.role, status: row.status, generations: row.generations, createdAt: row.created_at })),
-    recentErrors: errorsResult.rows.map((row) => ({ email: row.email, model: row.model, errorCode: row.error_code, durationMs: row.duration_ms, createdAt: row.created_at })),
-  };
+export async function getAdminDashboardData(): Promise<AdminDashboardData> {
+  const [overview, dailyUsage, roleDistribution, recentUsers, recentErrors] = await Promise.all([
+    getAdminOverview(), getAdminDailyUsage(), getAdminRoleDistribution(), getAdminUsers(8), getAdminErrors(8),
+  ]);
+  return { overview, dailyUsage, roleDistribution, recentUsers, recentErrors };
 }

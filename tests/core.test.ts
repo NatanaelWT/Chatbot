@@ -3,6 +3,7 @@ import { readFile } from "node:fs/promises";
 import test from "node:test";
 import { PGlite } from "@electric-sql/pglite";
 import { isAdminRole } from "../src/lib/roles.ts";
+import { impersonationDenial } from "../src/lib/impersonation-policy.ts";
 import { embeddedDataDir, isEmbeddedDatabaseUrl, parseAllowedModels } from "../src/lib/env.ts";
 import { isGmailAddress, matchesOAuthState, redirectResponse, validateGoogleIdentity } from "../src/lib/google-auth.ts";
 import { abortGeneration, clearGenerationAbort, registerGenerationAbort } from "../src/lib/generation-abort.ts";
@@ -14,6 +15,28 @@ test("only the persisted admin role grants dashboard access", () => {
   assert.equal(isAdminRole("admin"), true);
   assert.equal(isAdminRole("user"), false);
   assert.equal(isAdminRole(undefined), false);
+});
+
+test("impersonation policy permits only active admins targeting active non-admin users", () => {
+  const admin = { id: "admin-1", role: "admin", status: "active" };
+  const user = { id: "user-1", role: "user", status: "active" };
+  assert.equal(impersonationDenial(admin, user), null);
+  assert.equal(impersonationDenial({ ...admin, role: "user" }, user), "ACTOR_NOT_ADMIN");
+  assert.equal(impersonationDenial({ ...admin, status: "suspended" }, user), "ACTOR_NOT_ADMIN");
+  assert.equal(impersonationDenial(admin, null), "TARGET_NOT_FOUND");
+  assert.equal(impersonationDenial(admin, { ...user, id: admin.id }), "TARGET_IS_SELF");
+  assert.equal(impersonationDenial(admin, { ...user, role: "admin" }), "TARGET_NOT_USER");
+  assert.equal(impersonationDenial(admin, { ...user, status: "suspended" }), "TARGET_NOT_ACTIVE");
+});
+
+test("admin navigation uses separate pages instead of one-page anchors", async () => {
+  const source = await readFile(new URL("../src/components/admin-navigation.tsx", import.meta.url), "utf8");
+  assert.match(source, /href: "\/admin"/);
+  assert.match(source, /href: "\/admin\/usage"/);
+  assert.match(source, /href: "\/admin\/users"/);
+  assert.match(source, /href: "\/admin\/errors"/);
+  assert.doesNotMatch(source, /href: "#/);
+  assert.match(source, /aria-current=.*page/);
 });
 
 test("only the generation owner can stop an active provider request", () => {
@@ -45,13 +68,25 @@ test("fresh schema has no monetization storage and accepts generations directly"
     );
     assert.deepEqual(obsoleteTables.rows, []);
     assert.deepEqual(obsoleteColumns.rows, []);
+    const sessionColumns = await database.query<{ column_name: string }>(
+      `SELECT column_name FROM information_schema.columns WHERE table_name = 'sessions'
+       AND column_name = 'impersonator_user_id'`,
+    );
+    assert.equal(sessionColumns.rows.length, 1);
     await database.exec(`
       INSERT INTO users (id, email) VALUES ('user-1', 'user@gmail.com');
+      INSERT INTO users (id, email, role) VALUES ('admin-1', 'admin@gmail.com', 'admin');
+      INSERT INTO sessions (id, user_id, impersonator_user_id, token_hash, expires_at)
+        VALUES ('session-1', 'user-1', 'admin-1', 'token-1', NOW() + INTERVAL '1 day');
       INSERT INTO conversations (id, user_id) VALUES ('chat-1', 'user-1');
       INSERT INTO messages (id, conversation_id, role, content_json, status) VALUES ('message-1', 'chat-1', 'assistant', '{"text":""}', 'streaming');
       INSERT INTO generation_runs (id, request_id, user_id, conversation_id, assistant_message_id, model_id, status) VALUES ('run-1', 'request-1', 'user-1', 'chat-1', 'message-1', 'model-1', 'running');
     `);
     assert.equal((await database.query<{ count: number }>("SELECT COUNT(*)::int AS count FROM generation_runs")).rows[0].count, 1);
+    await assert.rejects(() => database.query(
+      `INSERT INTO sessions (id, user_id, impersonator_user_id, token_hash, expires_at)
+       VALUES ('session-self', 'admin-1', 'admin-1', 'token-self', NOW() + INTERVAL '1 day')`,
+    ));
   } finally {
     await database.close();
   }
